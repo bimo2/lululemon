@@ -1,0 +1,19 @@
+// https://json5.dev
+_x: 0,
+git: 'lululemon',
+require: [
+  'git',
+  'sbt',
+  'scala',
+  'mysql'
+],
+cli: {
+  run: {
+    d: 'run lululemon script',
+    zsh: 'sbt run'
+  },
+  clean: {
+    d: 'delete untracked files',
+    zsh: 'git clean -dfxi -e .env'
+  }
+}
