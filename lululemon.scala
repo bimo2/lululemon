@@ -1,7 +1,11 @@
 import java.io.File
 import java.io.FileWriter
+import sttp.client4._
+import sttp.client4.httpclient.HttpClientSyncBackend
 
-val schemaSQL = """
+val cik = Map("lululemon" -> "0001397187")
+
+val mysql = """
 DROP USER IF EXISTS device;
 DROP DATABASE IF EXISTS lululemon;
 CREATE DATABASE lululemon;
@@ -41,7 +45,22 @@ GRANT ALL PRIVILEGES ON lululemon.* TO 'device'@'%';
 FLUSH PRIVILEGES;
 """.stripMargin.trim
 
-def sqlout(path: String, statement: String): Unit = {
+def fetch(cik: String): Option[String] = {
+  implicit val backend = HttpClientSyncBackend()
+
+  val response = basicRequest
+    .get(uri"https://data.sec.gov/api/xbrl/companyfacts/CIK$cik.json")
+    .header("User-Agent", "Scala/1.0")
+    .send(backend)
+
+  response.body.toOption
+}
+
+def parse(json: String): Unit = {
+  println(json)
+}
+
+def sql(path: String, statement: String): Unit = {
   val file = new File(s"sql/$path")
   val directory = file.getParentFile
 
@@ -59,5 +78,6 @@ def sqlout(path: String, statement: String): Unit = {
 }
 
 @main def script(args: String*): Unit = {
-  sqlout("schema.sql", schemaSQL)
+  sql("schema.sql", mysql)
+  fetch(cik("lululemon")).foreach(parse)
 }
