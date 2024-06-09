@@ -10,7 +10,11 @@ require: [
 cli: {
   run: {
     d: 'run lululemon script',
-    zsh: 'sbt run'
+    zsh: [
+      'rm -rf sql && sbt run',
+      'mysql -u root -p < ./sql/schema.sql',
+      'find ./sql -type f -name "*.sql" ! -name "schema.sql" -exec cat {} + | mysql -u root -p lululemon'
+    ]
   },
   clean: {
     d: 'delete untracked files',
