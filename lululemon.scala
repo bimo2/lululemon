@@ -2,10 +2,12 @@ import java.io.File
 import java.io.FileWriter
 import sttp.client4._
 import sttp.client4.httpclient.HttpClientSyncBackend
+import zio._
+import zio.json._
 
 val cik = Map("lululemon" -> "0001397187")
 
-val mysql = """
+val schema = """
 DROP USER IF EXISTS device;
 DROP DATABASE IF EXISTS lululemon;
 CREATE DATABASE lululemon;
@@ -45,22 +47,59 @@ GRANT ALL PRIVILEGES ON lululemon.* TO 'device'@'%';
 FLUSH PRIVILEGES;
 """.stripMargin.trim
 
-def fetch(cik: String): Option[String] = {
+case class SECValue(
+  end: String,
+  `val`: BigDecimal,
+  accn: String,
+  fy: Int,
+  fp: String,
+  form: String,
+  filed: String,
+  frame: Option[String]
+)
+
+case class SECXBRL(
+  label: Option[String],
+  description: Option[String],
+  units: Map[String, List[SECValue]]
+)
+
+case class SECFile(
+  cik: Int,
+  entityName: String,
+  facts: Map[String, Map[String, SECXBRL]],
+)
+
+object SECValue {
+  implicit val decoder: JsonDecoder[SECValue] = DeriveJsonDecoder.gen[SECValue]
+}
+
+object SECXBRL {
+  implicit val decoder: JsonDecoder[SECXBRL] = DeriveJsonDecoder.gen[SECXBRL]
+}
+
+object SECFile {
+  implicit val decoder: JsonDecoder[SECFile] = DeriveJsonDecoder.gen[SECFile]
+}
+
+def fetch(cik: String): Option[SECFile] = {
   implicit val backend = HttpClientSyncBackend()
 
-  val response = basicRequest
+  val request = basicRequest
     .get(uri"https://data.sec.gov/api/xbrl/companyfacts/CIK$cik.json")
     .header("User-Agent", "Scala/1.0")
-    .send(backend)
 
-  response.body.toOption
+  request.send(backend).body.toOption match {
+    case Some(json) => json.fromJson[SECFile].toOption
+    case _ => None
+  }
 }
 
-def parse(json: String): Unit = {
-  println(json)
+def sql(file: SECFile): Unit = {
+  println(file.cik)
 }
 
-def sql(path: String, statement: String): Unit = {
+def write(path: String, statement: String): Unit = {
   val file = new File(s"sql/$path")
   val directory = file.getParentFile
 
@@ -78,6 +117,6 @@ def sql(path: String, statement: String): Unit = {
 }
 
 @main def script(args: String*): Unit = {
-  sql("schema.sql", mysql)
-  fetch(cik("lululemon")).foreach(parse)
+  write("schema.sql", schema)
+  fetch(cik("lululemon")).foreach(sql)
 }
