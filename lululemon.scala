@@ -1,11 +1,18 @@
 import java.io.File
 import java.io.FileWriter
+import java.time.LocalDate
+import java.time.ZoneId
+import scala.util.Try
 import sttp.client4._
 import sttp.client4.httpclient.HttpClientSyncBackend
 import zio._
 import zio.json._
 
-val cik = Map("lululemon" -> "0001397187")
+enum SEC(val cik: String):
+  case lululemon extends SEC("0001397187")
+
+enum Stock(val exchange: String, val ticker: String, val sec: SEC):
+  case lululemon extends Stock("NASDAQ", "LULU", SEC.lululemon)
 
 val schema = """
 DROP USER IF EXISTS device;
@@ -27,7 +34,7 @@ CREATE TABLE lululemon.documents (
 );
 
 CREATE TABLE lululemon.xbrl (
-  id VARCHAR(255) PRIMARY KEY,
+  tag VARCHAR(255) PRIMARY KEY,
   label VARCHAR(255),
   description TEXT
 );
@@ -38,7 +45,27 @@ CREATE TABLE lululemon.financials (
   value DECIMAL(20, 4) NOT NULL,
   unit VARCHAR(8) NOT NULL,
   PRIMARY KEY (document, tag),
-  FOREIGN KEY (tag) REFERENCES xbrl(id)
+  FOREIGN KEY (tag) REFERENCES xbrl(tag)
+);
+
+CREATE TABLE lululemon.stock_exchange (
+  stock VARCHAR(5) PRIMARY KEY,
+  exchange VARCHAR(8) NOT NULL,
+  cik VARCHAR(10) NOT NULL,
+  FOREIGN KEY (cik) REFERENCES sec(cik)
+);
+
+CREATE TABLE lululemon.quotes (
+  stock VARCHAR(5) NOT NULL,
+  date DATE NOT NULL,
+  open DECIMAL(12, 4) NOT NULL,
+  high DECIMAL(12, 4) NOT NULL,
+  low DECIMAL(12, 4) NOT NULL,
+  close DECIMAL(12, 4) NOT NULL,
+  adj_close DECIMAL(12, 4) NOT NULL,
+  volume BIGINT NOT NULL,
+  PRIMARY KEY (stock, date),
+  FOREIGN KEY (stock) REFERENCES stock_exchange(stock)
 );
 
 CREATE USER 'device'@'%' IDENTIFIED BY 'CL0UD5Q1';
@@ -69,6 +96,17 @@ case class SECFile(
   facts: Map[String, Map[String, SECXBRL]],
 )
 
+case class Quote(
+  stock: Stock,
+  date: String,
+  open: BigDecimal,
+  high: BigDecimal,
+  low: BigDecimal,
+  close: BigDecimal,
+  adj_close: BigDecimal,
+  volume: Long
+)
+
 object SECValue {
   implicit val decoder: JsonDecoder[SECValue] = DeriveJsonDecoder.gen[SECValue]
 }
@@ -81,11 +119,15 @@ object SECFile {
   implicit val decoder: JsonDecoder[SECFile] = DeriveJsonDecoder.gen[SECFile]
 }
 
-def fetch(cik: String): Option[SECFile] = {
+def ixbrl(tag: String): String = {
+  tag.replaceAll("([a-z0-9])([A-Z])", "$1_$2").toLowerCase
+}
+
+def fetch(sec: SEC): Option[SECFile] = {
   implicit val backend = HttpClientSyncBackend()
 
   val request = basicRequest
-    .get(uri"https://data.sec.gov/api/xbrl/companyfacts/CIK$cik.json")
+    .get(uri"https://data.sec.gov/api/xbrl/companyfacts/CIK${sec.cik}.json")
     .header("User-Agent", "Scala/1.0")
 
   val response = request.send(backend)
@@ -96,26 +138,47 @@ def fetch(cik: String): Option[SECFile] = {
   }
 }
 
-def ixbrl(tag: String): String = {
-  tag.replaceAll("([a-z0-9])([A-Z])", "$1_$2").toLowerCase
-}
+def fetch(stock: Stock): Option[List[Quote]] = {
+  implicit val backend = HttpClientSyncBackend()
 
-def sqlcast(option: Option[Any]): String = {
-  option match {
-    case Some(value) => {
-      value match {
-        case string: String => s"\"$string\""
-        case _ => "NULL"
-      }
+  val period1 = LocalDate.of(2000, 1, 1).atStartOfDay(ZoneId.systemDefault()).toEpochSecond
+  val period2 = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toEpochSecond
+
+  val request = basicRequest
+    .get(uri"https://query1.finance.yahoo.com/v7/finance/download/${stock.ticker}?period1=$period1&period2=$period2&interval=1d&events=history&includeAdjustedClose=true")
+    .header("User-Agent", "Scala/1.0")
+
+  val response = request.send(backend)
+
+  response.body.toOption match {
+    case Some(csv) => {
+      val lines = csv.split("\n").toList
+
+      val quotes = for {
+        line <- lines.drop(1)
+        fields = line.split(",")
+        if fields.length == 7
+      } yield Quote(
+          stock = stock,
+          date = fields(0),
+          open = Try(BigDecimal(fields(1))).getOrElse(BigDecimal(0)),
+          high = Try(BigDecimal(fields(2))).getOrElse(BigDecimal(0)),
+          low = Try(BigDecimal(fields(3))).getOrElse(BigDecimal(0)),
+          close = Try(BigDecimal(fields(4))).getOrElse(BigDecimal(0)),
+          adj_close = Try(BigDecimal(fields(5))).getOrElse(BigDecimal(0)),
+          volume = Try(fields(6).toLong).getOrElse(0L)
+        )
+
+      Some(quotes)
     }
-    case _ => "NULL"
+    case _ => None
   }
 }
 
 def sql(file: SECFile): Unit = {
   val cik10 = f"${file.cik}%010d"
   val fileName = s"$cik10.sql"
-  val statement = s"INSERT INTO sec (cik, registrant) VALUES\n('$cik10', '${file.entityName}');\n"
+  val statement = s"INSERT INTO sec (cik, registrant) VALUES\n(\"$cik10\", \"${file.entityName}\");\n"
 
   sqlwrite(fileName, statement)
 
@@ -125,7 +188,7 @@ def sql(file: SECFile): Unit = {
   } yield s"(\"${ixbrl(tag)}\", ${sqlcast(xbrl.label)}, ${sqlcast(xbrl.description)})"
 
   if (xbrl.nonEmpty) {
-    val statement = s"INSERT IGNORE INTO xbrl (id, label, description) VALUES\n${xbrl.mkString(",\n")};\n"
+    val statement = s"INSERT IGNORE INTO xbrl (tag, label, description) VALUES\n${xbrl.mkString(",\n")};\n"
 
     sqlwrite(fileName, statement)
   }
@@ -159,6 +222,36 @@ def sql(file: SECFile): Unit = {
   }
 }
 
+def sql(quotes: List[Quote]): Unit = {
+  if (quotes.isEmpty) return
+
+  val stock = quotes.head.stock
+  val fileName = s"${stock.sec.cik}.sql"
+  val statement = s"INSERT INTO stock_exchange (stock, exchange, cik) VALUES\n (\"${stock.ticker}\", \"${stock.exchange}\", \"${stock.sec.cik}\");\n"
+
+  sqlwrite(fileName, statement)
+
+  val data = quotes.map { quote =>
+    s"(\"${quote.stock.ticker}\", \"${quote.date}\", ${quote.open}, ${quote.high}, ${quote.low}, ${quote.close}, ${quote.adj_close}, ${quote.volume})"
+  }
+
+  val statement2 = s"INSERT IGNORE INTO quotes (stock, date, open, high, low, close, adj_close, volume) VALUES\n${data.mkString(",\n")};\n"
+
+  sqlwrite(fileName, statement2)
+}
+
+def sqlcast(option: Option[Any]): String = {
+  option match {
+    case Some(value) => {
+      value match {
+        case string: String => s"\"$string\""
+        case _ => "NULL"
+      }
+    }
+    case _ => "NULL"
+  }
+}
+
 def sqlwrite(path: String, statement: String): Unit = {
   val file = new File(s"sql/$path")
   val directory = file.getParentFile
@@ -178,5 +271,6 @@ def sqlwrite(path: String, statement: String): Unit = {
 
 @main def script(args: String*): Unit = {
   sqlwrite("schema.sql", schema)
-  fetch(cik("lululemon")).foreach(sql)
+  fetch(SEC.lululemon).foreach(sql)
+  fetch(Stock.lululemon).foreach(sql)
 }
