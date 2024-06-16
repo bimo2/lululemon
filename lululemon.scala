@@ -43,7 +43,7 @@ CREATE TABLE lululemon.financials (
   document VARCHAR(20) NOT NULL,
   tag VARCHAR(255) NOT NULL,
   value DECIMAL(20, 4) NOT NULL,
-  unit VARCHAR(8) NOT NULL,
+  unit VARCHAR(12) NOT NULL,
   PRIMARY KEY (document, tag),
   FOREIGN KEY (tag) REFERENCES xbrl(tag)
 );
@@ -68,8 +68,8 @@ CREATE TABLE lululemon.quotes (
   FOREIGN KEY (stock) REFERENCES stock_exchange(stock)
 );
 
-CREATE USER 'device'@'%' IDENTIFIED BY 'CL0UD5Q1';
-GRANT ALL PRIVILEGES ON lululemon.* TO 'device'@'%';
+CREATE USER 'device'@'%' IDENTIFIED WITH caching_sha2_password BY 'CL0UD5Q1';
+GRANT SELECT ON lululemon.* TO 'device'@'%';
 FLUSH PRIVILEGES;
 """.stripMargin.trim
 
